@@ -132,6 +132,8 @@ typedef struct {
 #define TC_MODE_SDX_SIDE2	0x4C
 #define TC_MODE_SDX_U1MB	0x4D
 #define TC_MODE_DB_32		0x70
+#define TC_MODE_CORINA_512      0x71
+#define TC_MODE_CORINA_1024     0x72
 #define TC_MODE_BOUNTY_40	0x73
 
 static const cart_def_t cart_def[] = 
@@ -204,6 +206,8 @@ static const cart_def_t cart_def[] =
 	{ 76, "Williams       ", TC_MODE_WILLIAMS16,     16 },
 	{ 80, "JRC-Linear     ", TC_MODE_JRC_LIN_64,     64 },
 	{ 83, "S.I.C.+        ", TC_MODE_SIC_1024,     1024 },
+	{ 84, "Corina w/EEPROM", TC_MODE_CORINA_1024,  1032 },
+	{ 85, "Corina w/EEPROM", TC_MODE_CORINA_512,    520 },
 	{ 86, "XE Multicart   ", TC_MODE_XEMULTI_8,       8 },
 	{ 87, "XE Multicart   ", TC_MODE_XEMULTI_16,     16 },
 	{ 88, "XE Multicart   ", TC_MODE_XEMULTI_32,     32 },
@@ -261,6 +265,155 @@ static uint16_t get_a800_reg2(uint8_t reg)
 	return r;
 }
 
+static uint8_t mounted_cart1_type;
+static uint8_t mounted_cart2_type;
+static int mounted_cart1_size;
+static fileTYPE cart1_file = {};
+static fileTYPE cart2_file = {};
+
+static void reboot_800(uint8_t cold, uint8_t pause, uint8_t phase = 3)
+{
+	int i;
+
+	if(phase & 0x01)
+	{
+		set_a8bit_reg(REG_PAUSE, 1);
+		if (cold)
+		{
+			set_a8bit_reg(REG_FREEZER, 0);
+			set_a8bit_reg(REG_CART1_SELECT, 0);
+			set_a8bit_reg(REG_CART2_SELECT, 0);
+			// Initialize the first 64K of SDRAM with a pattern
+			for(i = 0; i < BUFFER_SIZE; i += 2)
+			{
+				a8bit_buffer[i] = 0xFF;
+				a8bit_buffer[i+1] = 0x00;
+			}
+			user_io_set_index(99);
+			user_io_set_download(1, SDRAM_BASE);
+			for(i = 0; i < 0x10000 / BUFFER_SIZE; i++) user_io_file_tx_data(a8bit_buffer, BUFFER_SIZE);
+			user_io_set_download(0);
+			if(mounted_cart1_type)
+			{
+				set_a8bit_reg(REG_CART1_SELECT, mounted_cart1_type);
+			}
+			else
+			{
+				mounted_cart1_size = 0;
+			}
+			if(mounted_cart2_type) set_a8bit_reg(REG_CART2_SELECT, mounted_cart2_type);
+		}
+		else
+		{
+			FileClose(&xex_file);
+		}
+		set_a8bit_reg(REG_XEX_LOADER, 0);
+	}
+	
+	// Both cold==1 and pause==1 is a special case when 
+	// the XEX loader performs a cold/warm boot to push 
+	// in the loader, in this case on the 800 we just want
+	// the same effect as pressing the RESET (so soft)
+	// while we actually mean a power cycle with forced
+	// OS initialization. (In other words, on 800 a power
+	// cycle does not allow to pre-init the OS to do a warm
+	// start, it will always be cold).
+
+	if((get_a8bit_reg(REG_ATARI_STATUS1) & STATUS1_MASK_MODE800) && (!cold || pause))
+	{
+		if(phase & 0x01) set_a8bit_reg(REG_RESET_RNMI, 1);
+		if(phase & 0x02) set_a8bit_reg(REG_RESET_RNMI, 0);
+	}
+	else
+	{
+		if(phase & 0x01) set_a8bit_reg(REG_RESET, 1);
+		if(phase & 0x02) set_a8bit_reg(REG_RESET, 0);
+	}
+
+	if(phase & 0x02)
+	{
+		if(cold) set_a8bit_reg(REG_FREEZER, 1);
+		if(!pause) set_a8bit_reg(REG_PAUSE, 0);
+	}
+}
+
+static void check_reset_pause()
+{
+	static uint8_t soft_reboot = 0;
+	static uint8_t cold_reboot = 0;
+
+	uint16_t atari_status1 = get_a8bit_reg(REG_ATARI_STATUS1);
+
+	if(!(soft_reboot | cold_reboot)) set_a8bit_reg(REG_PAUSE, atari_status1 & STATUS1_MASK_HALT);
+
+	if ((atari_status1 & STATUS1_MASK_SOFTBOOT) && !soft_reboot)
+	{
+		soft_reboot = 1;
+		reboot_800(0, 0, 1);
+	}
+	else if(!(atari_status1 & STATUS1_MASK_SOFTBOOT) && soft_reboot)
+	{
+		soft_reboot = 0;
+		reboot_800(0, 0, 2);
+	}
+	else if ((atari_status1 & STATUS1_MASK_COLDBOOT) && !cold_reboot)
+	{
+		cold_reboot = 1;
+		reboot_800(1, 0, 1);
+	}
+	else if(!(atari_status1 & STATUS1_MASK_COLDBOOT) && cold_reboot)
+	{
+		cold_reboot = 0;
+		reboot_800(1, 0, 2);
+	}
+}
+
+static void atari800_tape_wait()
+{
+#ifdef USE_SCHEDULER
+	int counter = 0;
+#endif
+	while(!(get_a8bit_reg(REG_ATARI_STATUS2) & STATUS2_MASK_TAPE_EMPTY))
+	{
+		check_reset_pause();
+#ifdef USE_SCHEDULER
+		counter++;
+		if(counter > 10)
+		{
+			counter = 0;
+			input_poll(0);
+			scheduler_yield();
+		}
+#endif
+	}
+}
+
+static void atari800_tape_enqueue(uint8_t b, uint32_t cnt)
+{
+#ifdef USE_SCHEDULER
+	int counter = 0;
+#endif
+	while(get_a8bit_reg(REG_ATARI_STATUS2) & STATUS2_MASK_TAPE_FULL)
+	{
+		check_reset_pause();
+#ifdef USE_SCHEDULER
+		counter++;
+		if(counter > 10)
+		{
+			counter = 0;
+			input_poll(0);
+			scheduler_yield();
+		}
+#endif
+	}
+	EnableIO();
+	spi8(A800_TAPE_ENQUEUE);
+	uint32_t data = b | (cnt << 1);
+	spi_w((uint16_t)data);
+	spi_w((uint16_t)(data >> 16));
+	DisableIO();
+}
+
 void atari8bit_dma_write(const uint8_t *buf, uint32_t addr, uint32_t len)
 {
 	user_io_set_index(99);
@@ -273,7 +426,7 @@ static void atari800_dma_read(uint8_t *buf, uint32_t addr, uint32_t len)
 {
 	user_io_set_index(99);
 	user_io_set_upload(1, addr);
-	user_io_file_rx_data(buf, len);		
+	user_io_file_rx_data(buf, len);
 	user_io_set_upload(0);
 }
 
@@ -281,7 +434,7 @@ void atari8bit_dma_zero(uint32_t addr, uint32_t len)
 {
 	memset(a8bit_buffer, 0, BUFFER_SIZE);
 	uint32_t to_write = len > BUFFER_SIZE ? BUFFER_SIZE : len;
-	
+
 	user_io_set_index(99);
 	user_io_set_download(1, addr);
 	while(len)
@@ -291,59 +444,6 @@ void atari8bit_dma_zero(uint32_t addr, uint32_t len)
 		to_write = len > BUFFER_SIZE ? BUFFER_SIZE : len;
 	}
 	user_io_set_upload(0);
-}
-
-static void reboot(uint8_t cold, uint8_t pause)
-{
-	int i;
-
-	set_a8bit_reg(REG_PAUSE, 1);
-	if (cold)
-	{
-		set_a8bit_reg(REG_FREEZER, 0);
-		// Initialize the first 64K of SDRAM with a pattern
-		for(i = 0; i < BUFFER_SIZE; i += 2)
-		{
-			a8bit_buffer[i] = 0xFF;
-			a8bit_buffer[i+1] = 0x00;
-		}
-		user_io_set_index(99);
-		user_io_set_download(1, SDRAM_BASE);
-		for(i = 0; i < 0x10000 / BUFFER_SIZE; i++) user_io_file_tx_data(a8bit_buffer, BUFFER_SIZE);
-		user_io_set_upload(0);
-	}
-	else
-	{
-		FileClose(&xex_file);
-	}
-	
-	// Both cold==1 and pause==1 is a special case when 
-	// the XEX loader performs a cold/warm boot to push 
-	// in the loader, in this case on the 800 we just want
-	// the same effect as pressing the RESET (so soft)
-	// while we actually mean a power cycle with forced
-	// OS initialization. (In other words, on 800 a power
-	// cycle does not allow to pre-init the OS to do a warm
-	// start, it will always be cold).
-
-	set_a8bit_reg(REG_XEX_LOADER, 0);
-
-	if((get_a8bit_reg(REG_ATARI_STATUS1) & STATUS1_MASK_MODE800) && (!cold || pause))
-	{
-		set_a8bit_reg(REG_RESET_RNMI, 1);
-		set_a8bit_reg(REG_RESET_RNMI, 0);
-	}
-	else
-	{
-		set_a8bit_reg(REG_RESET, 1);
-		set_a8bit_reg(REG_RESET, 0);
-	}
-
-	if(cold)
-	{
-		set_a8bit_reg(REG_FREEZER, 1);
-	}
-	set_a8bit_reg(REG_PAUSE, pause);
 }
 
 static void uart_init(uint8_t divisor)
@@ -363,7 +463,7 @@ static void uart_send(uint8_t data)
 #endif
 	while(uart_full())
 	{
-		usleep(100);
+		check_reset_pause();
 #ifdef USE_SCHEDULER
 		counter++;
 		if(counter > 10)
@@ -389,7 +489,7 @@ static uint16_t uart_receive()
 #endif
 	while(!uart_available())
 	{
-		usleep(100);
+		check_reset_pause();
 		counter++;
 #ifdef USE_SCHEDULER
 		if(counter > 10)
@@ -418,7 +518,6 @@ static int cart_matches_total;
 static uint8_t cart_matches_mode[16]; // The are 15 supported 64K carts, this is the max ATM
 static int cart_matches_idx[16];
 static uint8_t cart_match_car;
-static int mounted_cart1_size; 
 static unsigned char cart_io_index;
 
 int atari800_get_match_cart_count()
@@ -433,12 +532,17 @@ const char *atari800_get_cart_match_name(int match_index)
 
 void atari800_umount_cartridge(uint8_t stacked)
 {
-	// TODO Clever cart deselect 1 & 2 and reboot?
-	set_a8bit_reg(stacked ? REG_CART2_SELECT : REG_CART1_SELECT, 0);
-	if(!stacked)
+	if(stacked)
 	{
-		mounted_cart1_size = 0;
-	}		
+		mounted_cart2_type = 0;
+		FileClose(&cart2_file);
+	}
+	else
+	{
+		mounted_cart1_type = 0;
+		FileClose(&cart1_file);
+	}
+	if(get_a8bit_reg(REG_ATARI_FLASH) & 0x10) reboot_800(1, 0);
 }
 
 int atari800_check_cartridge_file(const char* name, unsigned char index)
@@ -523,80 +627,87 @@ void atari800_open_cartridge_file(const char* name, int match_index)
 	uint8_t stacked = (cart_io_index & 0x3F) == 9;
 	uint8_t *buf = &a8bit_buffer[0];
 	uint8_t *buf2 = &a8bit_buffer[4096];
-	fileTYPE f = {};
+	fileTYPE *f = stacked ? &cart2_file : &cart1_file;
 	int offset = cart_match_car ? 16 : 0;
 	uint8_t cart_type = cart_def[cart_matches_idx[match_index]].cart_type;
 
-	if (FileOpen(&f, name))
+	FileClose(f);
+	
+	if (FileOpenEx(f, name, !FileCanWrite(name) || (get_a8bit_reg(REG_ATARI_STATUS1) & STATUS1_MASK_RDONLY) ? O_RDONLY : (O_RDWR | O_SYNC)))
 	{
-		set_a8bit_reg(REG_PAUSE, 1);
-		set_a8bit_reg(REG_CART2_SELECT, 0);
-		if(!stacked) set_a8bit_reg(REG_CART1_SELECT, 0);
+		// set_a8bit_reg(REG_PAUSE, 1);
 
 		ProgressMessage(0, 0, 0, 0);
-		FileSeek(&f, offset, SEEK_SET);
+		FileSeek(f, offset, SEEK_SET);
 
 		user_io_set_index(cart_io_index);
 		user_io_set_download(1);
 	
 		if(cart_type == 3 || cart_type == 45)
 		{
-			ProgressMessage("Loading", f.name, 0, 6);
-			FileReadAdv(&f, buf, 4096);
+			ProgressMessage("Loading", f->name, 0, 6);
+			FileReadAdv(f, buf, 4096);
 			user_io_file_tx_data(buf, 4096);
 
-			if (cart_type == 3) FileSeek(&f, offset + 8192, SEEK_SET);
-			ProgressMessage("Loading", f.name, 1, 6);
-			FileReadAdv(&f, buf, 4096);
+			if (cart_type == 3) FileSeek(f, offset + 8192, SEEK_SET);
+			ProgressMessage("Loading", f->name, 1, 6);
+			FileReadAdv(f, buf, 4096);
 			user_io_file_tx_data(buf, 4096);
 
-			if (cart_type == 3) FileSeek(&f, offset + 4096, SEEK_SET);
-			ProgressMessage("Loading", f.name, 2, 6);
-			FileReadAdv(&f, buf2, 4096); // NOTE different buffer!
+			if (cart_type == 3) FileSeek(f, offset + 4096, SEEK_SET);
+			ProgressMessage("Loading", f->name, 2, 6);
+			FileReadAdv(f, buf2, 4096); // NOTE different buffer!
 			user_io_file_tx_data(buf2, 4096);
 			
-			if (cart_type == 3) FileSeek(&f, offset + 12288, SEEK_SET);
-			ProgressMessage("Loading", f.name, 3, 6);
-			FileReadAdv(&f, buf, 4096);
+			if (cart_type == 3) FileSeek(f, offset + 12288, SEEK_SET);
+			ProgressMessage("Loading", f->name, 3, 6);
+			FileReadAdv(f, buf, 4096);
 			user_io_file_tx_data(buf, 4096);
 			
-			FileSeek(&f, offset, SEEK_SET);
-			ProgressMessage("Loading", f.name, 4, 6);
-			FileReadAdv(&f, buf, 4096);
+			FileSeek(f, offset, SEEK_SET);
+			ProgressMessage("Loading", f->name, 4, 6);
+			FileReadAdv(f, buf, 4096);
 			for(int i = 0; i < 4096; i++) buf[i] &= buf2[i];
 			user_io_file_tx_data(buf, 4096);
 
-			if (cart_type == 3) FileSeek(&f, offset + 8192, SEEK_SET);
-			ProgressMessage("Loading", f.name, 5, 6);
-			FileReadAdv(&f, buf, 4096);
+			if (cart_type == 3) FileSeek(f, offset + 8192, SEEK_SET);
+			ProgressMessage("Loading", f->name, 5, 6);
+			FileReadAdv(f, buf, 4096);
 			for(int i = 0; i < 4096; i++) buf[i] &= buf2[i];
 			user_io_file_tx_data(buf, 4096);
 		}
 		else
 		{
-			while (offset < f.size)
+			while (offset < f->size)
 			{
-				int to_read = f.size - offset;
+				int to_read = f->size - offset;
 				if (to_read > BUFFER_SIZE) to_read = BUFFER_SIZE;
-				ProgressMessage("Loading", f.name, offset, f.size);
-				FileReadAdv(&f, a8bit_buffer, to_read);
+				ProgressMessage("Loading", f->name, offset, f->size + (cart_type == 85 ? 0x80000 : 0));
+				FileReadAdv(f, a8bit_buffer, to_read);
 				user_io_file_tx_data(a8bit_buffer, to_read);
 				offset += to_read;
 			}
+			if(cart_type == 85)
+			{
+				atari800_dma_read(a8bit_buffer, SDRAM_BASE + 0x880000 + (stacked ? 0x100000 : 0), 8192);
+				atari8bit_dma_write(a8bit_buffer, SDRAM_BASE + 0x900000 + (stacked ? 0x100000 : 0), 8192);
+				ProgressMessage("Loading", f->name, offset, f->size);
+				atari8bit_dma_zero(SDRAM_BASE + 0x880000 + (stacked ? 0x100000 : 0), 0x80000);
+			}
 		}
-		FileClose(&f);
 		user_io_set_download(0);
 		ProgressMessage(0, 0, 0, 0);
-		set_a8bit_reg(stacked ? REG_CART2_SELECT : REG_CART1_SELECT, cart_matches_mode[match_index]);
 		if(!stacked)
 		{
-			mounted_cart1_size = cart_match_car ? f.size - 16 : f.size;
+			mounted_cart1_type = cart_matches_mode[match_index];
+			mounted_cart1_size = cart_match_car ? f->size - 16 : f->size;
+			if(cart_type == 85) mounted_cart1_size += 0x80000;
 		}
-
-		if(!stacked || (get_a8bit_reg(REG_ATARI_STATUS1) & STATUS1_MASK_MODE800))
+		else
 		{
-			reboot(1, 0);
+			mounted_cart2_type = cart_matches_mode[match_index];
 		}
+		if(get_a8bit_reg(REG_ATARI_FLASH) & 0x10) reboot_800(1, 0);
 	}
 }
 
@@ -605,7 +716,7 @@ void atari800_open_bios_file(const char* name, unsigned char index)
 	uint8_t bios_index = (index & 0x3F);
 	uint16_t mode800 = get_a8bit_reg(REG_ATARI_STATUS1) & STATUS1_MASK_MODE800;
 	user_io_file_tx(name, index);
-	if((mode800 && bios_index == 6) || (!mode800 && (bios_index == 4 || bios_index == 5))) reboot(1, 0);
+	if((mode800 && bios_index == 6) || (!mode800 && (bios_index == 4 || bios_index == 5))) reboot_800(1, 0);
 }
 
 #define MAX_DRIVES 15
@@ -789,13 +900,14 @@ static uint64_t get_us(uint64_t offset)
 static uint8_t check_us(uint64_t time)
 {
 	long int remaining = time - get_us(0);
-#ifdef USE_SCHEDULER
 	if(remaining >= (long int)10000)
 	{
+		check_reset_pause();
+#ifdef USE_SCHEDULER
 		input_poll(0);
 		scheduler_yield();
-	}
 #endif
+	}
 	return remaining <= 0;
 }
 
@@ -1850,17 +1962,308 @@ static void process_command()
 	}
 }
 
+#define CORE_HZ         28636364
+#define MAX_MS          60000
+
+#define cas_header_FUJI 0x494A5546
+#define cas_header_baud 0x64756162
+#define cas_header_data 0x61746164
+#define cas_header_fsk  0x206B7366
+#define cas_header_pwms 0x736D7770
+#define cas_header_pwmc 0x636D7770
+#define cas_header_pwmd 0x646D7770
+#define cas_header_pwml 0x6C6D7770
+
+typedef struct  {
+	uint32_t signature;
+	uint16_t chunk_length;
+	union {
+		uint8_t aux_b[2];
+		uint16_t aux_w;
+	} aux;
+} __attribute__((packed)) cas_header_t;
+
+static fileTYPE cas_file = {};
+static cas_header_t cas_header;
+
+static uint32_t pwm_sample_duration;
+static uint32_t cas_sample_duration;
+static uint16_t silence_duration;
+
+static uint32_t cas_offset;
+static uint8_t cas_block_turbo;
+static uint8_t cas_block_turbo_prev;
+static uint16_t cas_block_index;
+static uint16_t cas_block_multiple;
+static uint8_t cas_fsk_bit;
+static uint8_t pwm_bit;
+static uint8_t pwm_bit_order;
+static int cas_block_pause;
+
+void atari800_check_osd_key(unsigned short key, int press)
+{
+	static uint8_t first = 1;
+	if(cas_file.opened())
+	{
+		if(key == KEY_F11 && press)
+		{
+			if(first)
+			{
+				first = 0;
+				ProgressMessage(0, 0, 0, 0);
+			}
+			ProgressMessage("CAS Tape", cas_file.name, cas_offset, cas_file.size);
+		}
+	}
+}
+
+static uint32_t cas_read_forward(uint32_t offset) {
+
+	uint32_t bytes_read;
+
+	if(!FileSeek(&cas_file, offset, SEEK_SET)) return 0;
+
+	while(1)
+	{
+		bytes_read = FileReadAdv(&cas_file, (uint8_t *)&cas_header, sizeof(cas_header_t));
+		if(bytes_read != sizeof(cas_header_t)) return 0;
+		offset += bytes_read;
+		cas_block_index = 0;
+
+		switch(cas_header.signature) {
+
+			case cas_header_FUJI:
+				offset += cas_header.chunk_length;
+				if(!FileSeek(&cas_file, offset, SEEK_SET)) return 0;
+				break;
+
+			case cas_header_baud:
+				if(cas_header.chunk_length) return 0;
+				cas_sample_duration = (CORE_HZ + cas_header.aux.aux_w / 2) / cas_header.aux.aux_w;
+				break;
+
+			case cas_header_data:
+				cas_block_turbo_prev = cas_block_turbo;
+				cas_block_turbo = 0;
+				silence_duration = cas_header.aux.aux_w;
+				cas_block_multiple = 1;
+				goto cas_read_forward_exit;
+
+			case cas_header_fsk:
+				cas_block_turbo_prev = cas_block_turbo;
+				cas_block_turbo = 0;
+				silence_duration = cas_header.aux.aux_w;
+				cas_block_multiple = 2;
+				cas_fsk_bit = 0;
+				goto cas_read_forward_exit;
+				
+			case cas_header_pwms:
+				if(cas_header.chunk_length != 2)
+				{
+					offset = 0;
+					goto cas_read_forward_exit;
+				}
+				pwm_bit_order = (cas_header.aux.aux_b[0] >> 2) & 0x1;
+				cas_header.aux.aux_b[0] &= 0x3;
+
+				if(cas_header.aux.aux_b[0] == 0b01) pwm_bit = 0;
+				else if(cas_header.aux.aux_b[0] == 0b10) pwm_bit = 1;
+				else
+				{
+					offset = 0;
+					goto cas_read_forward_exit;
+				}
+				pwm_sample_duration = 0;
+				bytes_read = FileReadAdv(&cas_file, (uint8_t *)&pwm_sample_duration, sizeof(uint16_t));
+				if(bytes_read != sizeof(uint16_t))
+				{
+					offset = 0;
+					goto cas_read_forward_exit;
+				}
+				offset += bytes_read;
+				pwm_sample_duration = (CORE_HZ + pwm_sample_duration / 2) / pwm_sample_duration;
+				break;
+
+			case cas_header_pwmc:
+				cas_block_turbo_prev = cas_block_turbo;
+				cas_block_turbo = 1;
+				silence_duration = cas_header.aux.aux_w;
+				cas_block_multiple = 3;
+				goto cas_read_forward_exit;
+
+			case cas_header_pwmd:
+				cas_block_turbo_prev = cas_block_turbo;
+				cas_block_turbo = 1;
+				cas_block_multiple = 1;
+				goto cas_read_forward_exit;
+
+			case cas_header_pwml:
+				cas_block_turbo_prev = cas_block_turbo;
+				cas_block_turbo = 1;
+				silence_duration = cas_header.aux.aux_w;
+				cas_block_multiple = 2;
+				cas_fsk_bit = pwm_bit;
+				goto cas_read_forward_exit;
+
+			default:
+				break;
+		}
+	}
+
+cas_read_forward_exit:
+	if(cas_block_turbo ^ cas_block_turbo_prev) atari800_tape_enqueue(1, cas_block_turbo ? 0x00000001 : 0x00000000);
+	return offset;
+}
+
+static void handle_cas()
+{
+
+	if(!(get_a8bit_reg(REG_ATARI_STATUS2) & STATUS2_MASK_TAPE_ACT)) return;
+
+	int to_read = (cas_block_turbo ? 128 : 256) * cas_block_multiple;
+	if(to_read >= cas_header.chunk_length - cas_block_index) to_read = cas_header.chunk_length - cas_block_index;
+
+	if(!FileSeek(&cas_file, cas_offset, SEEK_SET) || FileReadAdv(&cas_file, a8bit_buffer, to_read) != to_read)
+	{
+		FileClose(&cas_file);
+		return;
+	}
+	cas_offset += to_read;
+
+	uint8_t silence_bit = (cas_block_turbo ? pwm_bit : 1);
+
+	while(silence_duration > 0) {
+		uint16_t silence_block_len = silence_duration;
+		if(silence_block_len >= MAX_MS) silence_block_len = MAX_MS;
+		atari800_tape_enqueue(silence_bit, ((CORE_HZ + 500) / 1000) * silence_block_len);
+		silence_duration -= silence_block_len;
+	}
+
+	cas_block_index += to_read;
+
+	int bs, be, bd;
+	uint8_t b;
+	uint16_t ld;
+
+	for(int i=0; i < to_read; i += cas_block_multiple) {
+		switch(cas_header.signature) {
+
+			case cas_header_data:
+				atari800_tape_enqueue(0, cas_sample_duration);
+				b = a8bit_buffer[i];
+				for(int j = 0; j != 8; j++)
+				{
+					atari800_tape_enqueue(b & 0x1, cas_sample_duration);
+					b >>= 1;
+				}
+				atari800_tape_enqueue(1, cas_sample_duration);
+				break;
+
+			case cas_header_fsk:
+			case cas_header_pwml:
+				ld = a8bit_buffer[i] | (a8bit_buffer[i+1] << 8);
+				if(ld) atari800_tape_enqueue(cas_fsk_bit, (cas_block_turbo ? pwm_sample_duration : ((CORE_HZ + 5000)/10000)) * ld);
+				cas_fsk_bit ^= 1;
+				break;
+
+			case cas_header_pwmc:
+				ld = a8bit_buffer[i+1] | (a8bit_buffer[i+2] << 8);
+				for(int j=0; j < ld; j++)
+				{
+					atari800_tape_enqueue(pwm_bit, a8bit_buffer[i] * pwm_sample_duration / 2);
+					atari800_tape_enqueue(pwm_bit ^ 1, a8bit_buffer[i] * pwm_sample_duration / 2);
+				}
+				break;
+
+			case cas_header_pwmd:
+				b = a8bit_buffer[i];
+				if (pwm_bit_order)
+				{
+					bs = 7; be = -1; bd = -1;
+				}
+				else
+				{
+					bs = 0; be = 8; bd = 1;
+				}
+				for(int j = bs; j != be; j += bd)
+				{
+					uint8_t d = cas_header.aux.aux_b[(b >> j) & 0x1];
+					atari800_tape_enqueue(pwm_bit, d * pwm_sample_duration / 2);
+					atari800_tape_enqueue(pwm_bit ^ 1, d * pwm_sample_duration / 2);
+				}
+			default:
+				break;
+		}
+	}
+	if(cas_offset == cas_file.size)
+	{
+		atari800_tape_enqueue(cas_block_turbo ? pwm_bit : 1, 16);
+		FileClose(&cas_file);
+		return;
+	}
+	else if(cas_block_index == cas_header.chunk_length && cas_offset < cas_file.size)
+	{
+		cas_offset = cas_read_forward(cas_offset);
+		if(!cas_offset)
+		{
+			FileClose(&cas_file);
+			return;
+		}
+		else if(cas_header.signature == cas_header_pwmc || cas_header.signature == cas_header_data || silence_duration || cas_block_turbo ^ cas_block_turbo_prev)
+		{
+			atari800_tape_enqueue((cas_block_turbo_prev != 0xFF ? cas_block_turbo_prev : cas_block_turbo) ? pwm_bit : 1, 16);
+			atari800_tape_wait();
+			wait_us(cas_block_pause);
+		}
+	}
+}
+
 void atari800_set_image(int ext_index, int file_index, const char *name)
 {
-	if(file_index == 5) // XEX file
+	if(file_index == 7 || file_index == 8) // CAS file (8 with auto boot)
+	{
+		cas_offset = 0;
+		cas_block_turbo = 0xFF;
+		cas_block_turbo_prev = 0xFF;
+		set_a8bit_reg(TAPE_RESET, 1);
+		set_a8bit_reg(TAPE_RESET, 0);
+		cas_block_pause = (get_a8bit_reg(REG_ATARI_STATUS2) & STATUS2_MASK_TAPE_SLOW) ? 400000 : 10000;
+		if(name[0] && FileOpen(&cas_file, name))
+		{
+			cas_sample_duration = (CORE_HZ + 300) / 600;
+			if(FileReadAdv(&cas_file, (uint8_t *)&cas_header, sizeof(cas_header_t)) == sizeof(cas_header_t) && cas_header.signature == cas_header_FUJI)
+			{
+				cas_offset = cas_read_forward(cas_header.chunk_length + sizeof(cas_header_t));
+			}
+		}
+		
+		if(!cas_offset)
+		{
+			FileClose(&cas_file);
+		}
+		else if(file_index == 8)
+		{
+			//set_a8bit_reg(REG_PAUSE, 1);
+			mounted_cart1_type = 0;
+			mounted_cart2_type = 0;
+			reboot_800(1, 0);
+			set_a8bit_reg(REG_OPTION_FORCE, 1);
+			set_a8bit_reg(REG_START_FORCE, 1);
+			set_a8bit_reg(REG_OPTION_FORCE, 0);
+			set_a8bit_reg(REG_START_FORCE, 0);
+			set_a8bit_reg(REG_SPACE_FORCE, 1);
+			set_a8bit_reg(REG_SPACE_FORCE, 0);
+		}
+	}
+	else if(file_index == 5) // XEX file
 	{
 		if(name[0] && FileOpen(&xex_file, name))
 		{
 			xex_file_first_block = 1;
-			reboot(1, 1);
+			mounted_cart1_type = 0;
+			mounted_cart2_type = 0;
+			reboot_800(1, 1);
 			set_a8bit_reg(REG_XEX_LOADER, 1);
-			set_a8bit_reg(REG_CART1_SELECT, 0);
-			set_a8bit_reg(REG_CART2_SELECT, 0);
 			uint16_t atari_status1 = get_a8bit_reg(REG_ATARI_STATUS1);
 
 			atari8bit_dma_zero(SDRAM_BASE, 0x10000);
@@ -1901,14 +2304,17 @@ void atari800_set_image(int ext_index, int file_index, const char *name)
 	{
 		if(name[0])
 		{
-			set_a8bit_reg(REG_PAUSE, 1);
-			set_a8bit_reg(REG_CART1_SELECT, 0);
-			set_a8bit_reg(REG_CART2_SELECT, 0);
+			//set_a8bit_reg(REG_PAUSE, 1);
+			mounted_cart1_type = 0;
+			mounted_cart2_type = 0;
+			FileClose(&cas_file);
+			set_a8bit_reg(TAPE_RESET, 1);
+			set_a8bit_reg(TAPE_RESET, 0);
 		}
 		set_drive_status(0, name, ext_index);
 		if(name[0])
 		{
-			reboot(1, 0);
+			reboot_800(1, 0);
 			set_a8bit_reg(REG_OPTION_FORCE, 1);
 			set_a8bit_reg(REG_OPTION_FORCE, 0);
 		}
@@ -2126,22 +2532,75 @@ xex_eof:
 
 }
 
+static void check_flash()
+{
+	static uint8_t flash_dirty = 0;
+	static uint64_t flash_dirty_stamp = 0;
+
+	uint16_t r = get_a8bit_reg(REG_ATARI_FLASH);
+
+	if(r & 0x0001)
+	{
+		flash_dirty_stamp = get_us(2000000);
+		flash_dirty |= (r & 0x0002) ? 2 : 1;
+	}
+
+	// Explicit save request or autosave and timer expired
+	if(flash_dirty && ((r & 0x0008) || ((r & 0x0004) && flash_dirty_stamp <= get_us(0))))
+	{
+		uint8_t stacked = flash_dirty & 0x02;
+		fileTYPE *f = stacked ? &cart2_file : &cart1_file;
+
+		if(!(f->mode & O_RDONLY))
+		{
+			uint8_t report_progress = r & 0x0008;
+			uint8_t car_file_type = (f->size & 0x3FF) == 16;
+			uint32_t mem_offset = SDRAM_BASE + 0x800000;
+			uint32_t check_sum = 0;
+			int offset = car_file_type ? 16 : 0;
+			if(stacked) mem_offset += 0x100000;
+			if(f->size - offset == 0x82000 || f->size - offset == 0x102000)
+			{
+				// Corina carts, need only the last 8K (EEPROM) to be saved
+				mem_offset += 0x100000;
+				offset = f->size - 0x2000;
+			}
+			FileSeek(f, offset, SEEK_SET);
+			if(report_progress) ProgressMessage(0, 0, 0, 0);
+			while (offset < f->size)
+			{
+				int to_write = f->size - offset;
+				if (to_write > BUFFER_SIZE) to_write = BUFFER_SIZE;
+				if(report_progress) ProgressMessage("Saving", f->name, offset, f->size);
+				atari800_dma_read(a8bit_buffer, mem_offset, to_write);
+				FileWriteAdv(f, a8bit_buffer, to_write);
+				if(car_file_type) for(int i = 0; i < to_write; i++) check_sum += a8bit_buffer[i];
+				offset += to_write;
+				mem_offset += to_write;
+			}
+			if(car_file_type)
+			{
+				FileSeek(f, 8, SEEK_SET);
+				a8bit_buffer[0] = (check_sum >> 24);
+				a8bit_buffer[1] = (check_sum >> 16);
+				a8bit_buffer[2] = (check_sum >> 8);
+				a8bit_buffer[3] = check_sum;
+				FileWriteAdv(f, a8bit_buffer, 4);
+			}
+			if(report_progress) ProgressMessage(0, 0, 0, 0);
+			else Info("Cart image saved.", 2000);
+		}
+		flash_dirty = 0;
+	}
+}
+
 void atari800_poll()
 {
-	uint16_t atari_status1 = get_a8bit_reg(REG_ATARI_STATUS1);
-
-	set_a8bit_reg(REG_PAUSE, atari_status1 & STATUS1_MASK_HALT);
-
-	if (atari_status1 & STATUS1_MASK_SOFTBOOT)
-	{
-		reboot(0, 0);	
-	}
-	else if (atari_status1 & STATUS1_MASK_COLDBOOT)
-	{
-		reboot(1, 0);	
-	}
+	check_reset_pause();
+	check_flash();
 	
 	if(xex_file.opened()) handle_xex();
+	if(cas_file.opened()) handle_cas();
 	handle_pbi();
 	process_command();
 }
@@ -2175,16 +2634,19 @@ void atari800_init()
 void atari800_reset()
 {
 	set_a8bit_reg(REG_PAUSE, 1);
-	set_a8bit_reg(REG_CART1_SELECT, 0);
-	mounted_cart1_size = 0;
-	set_a8bit_reg(REG_CART2_SELECT, 0);
-	set_a8bit_reg(REG_FREEZER, 0);
+	mounted_cart1_type = 0;
+	mounted_cart2_type = 0;
 	for(int i=0; i <= MAX_DRIVES; i++)
 	{
 		FileClose(&drive_infos[i].file);
 	}
 	FileClose(&xex_file);
+	FileClose(&cas_file);
+	FileClose(&cart1_file);
+	FileClose(&cart2_file);
+	set_a8bit_reg(TAPE_RESET, 1);
+	set_a8bit_reg(TAPE_RESET, 0);
 	speed_index = 0;
 	uart_init(speeds[speed_index] + 6);
-	reboot(1, 0);
+	reboot_800(1, 0);
 }

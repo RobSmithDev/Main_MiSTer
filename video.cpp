@@ -100,6 +100,8 @@ static uint8_t last_vrr_mode = 0xFF;
 static float last_vrr_rate = 0.0f;
 static uint32_t last_vrr_vfp = 0;
 static uint8_t edid[256] = {};
+static uint16_t raw_edid_mfg_id = 0;
+static bool raw_edid_mfg_id_valid = false;
 
 struct vmode_t
 {
@@ -1514,6 +1516,7 @@ static void hdmi_config_init()
 
 		0xBB, 0x00,				// ADI required Write.
 		0xDE, 0x9C,				// ADI required Write.
+		0xE2, 0x01,				// Power down the CEC.
 		0xE4, 0x60,				// ADI required Write.
 		0xFA, 0x7D,				// Nbr of times to search for good phase
 
@@ -1560,6 +1563,23 @@ static void hdmi_config_init()
 	}
 
 	hdmi_config_set_csc();
+}
+
+void video_hdmi_power(int on)
+{
+	// ADV7513 power-down control. 0 = power on, 1 = power down.
+	int fd = i2c_open(0x39, 0);
+	if (fd >= 0)
+	{
+		uint8_t val = on ? 0x00 : 0x40;
+		int res = i2c_smbus_write_byte_data(fd, 0x41, val);
+		if (res < 0) printf("i2c: write error (41 %02X): %d\n", val, res);
+		i2c_close(fd);
+	}
+	else
+	{
+		printf("*** ADV7513 not found on i2c bus! HDMI won't be available!\n");
+	}
 }
 
 static void hdmi_config_set_hdr()
@@ -1767,11 +1787,18 @@ static int is_edid_valid()
 	return !memcmp(edid, magic, sizeof(magic));
 }
 
+static void cache_raw_edid_mfg_id()
+{
+	raw_edid_mfg_id = (edid[0x08] << 8) | edid[0x09];
+	raw_edid_mfg_id_valid = true;
+}
+
 static int get_active_edid()
 {
 	int fd = i2c_open(0x39, 0);
 	if (fd < 0)
 	{
+		raw_edid_mfg_id_valid = false;
 		printf("EDID: cannot find main i2c device\n");
 		return 0;
 	}
@@ -1781,6 +1808,7 @@ static int get_active_edid()
 	if (hpd_state < 0 || !(hpd_state & 0x20))
 	{
 		i2c_close(fd);
+		raw_edid_mfg_id_valid = false;
 		return 0;
 	}
 
@@ -1794,6 +1822,7 @@ static int get_active_edid()
 	fd = i2c_open(0x3f, 0);
 	if (fd < 0)
 	{
+		raw_edid_mfg_id_valid = false;
 		printf("EDID: cannot find i2c device.\n");
 		return 0;
 	}
@@ -1808,6 +1837,7 @@ static int get_active_edid()
 
 	i2c_close(fd);
 	printf("EDID:\n"); hexdump(edid, sizeof(edid), 0);
+	cache_raw_edid_mfg_id();
 
 	if (!is_edid_valid())
 	{
@@ -2435,10 +2465,16 @@ static int should_auto_enable_direct_video()
 		get_active_edid();
 	}
 
-	if (!is_edid_valid()) return 0;
-
-	// Check manufacturer ID (bytes 0x08-0x09)
-	uint16_t mfg_id = (edid[0x08] << 8) | edid[0x09];
+	uint16_t mfg_id = 0;
+	if (is_edid_valid()) {
+		// Check manufacturer ID (bytes 0x08-0x09)
+		mfg_id = (edid[0x08] << 8) | edid[0x09];
+	} else if (raw_edid_mfg_id_valid) {
+		mfg_id = raw_edid_mfg_id;
+		printf("EDID: Invalid header, using raw manufacturer ID 0x%04X for DAC detection.\n", mfg_id);
+	} else {
+		return 0;
+	}
 
 	// Check against known DACs from config
 	for (int i = 0; i < dac_config_count; i++) {
@@ -3900,6 +3936,23 @@ void video_cmd(char *cmd)
 	}
 }
 
+void video_mode_cmd(char *cmd)
+{
+	vmode_custom_t v = {};
+	int ret = parse_custom_video_mode(cmd, &v);
+	if (ret != -2)
+	{
+		printf("video_mode_cmd: only custom modelines are supported, got \"%s\"\n", cmd);
+		return;
+	}
+
+	v_def = v;
+	v_cur = v;
+	video_set_mode(&v, v.Fpix);
+	user_io_send_buttons(1);
+	printf("video_mode_cmd: applied mode \"%s\"\n", cmd);
+}
+
 static constexpr int CELL_GRAN_RND = 4;
 
 static int determine_vsync(int w, int h)
@@ -4058,5 +4111,4 @@ int video_get_rotated()
 {
   return current_video_info.rotated;
 }
-
 

@@ -1,8 +1,9 @@
 #ifndef __MINIMIG_IPF_H__
 #define __MINIMIG_IPF_H__
 
-#include "../../file_io.h"
-#include "minimig_fdd.h"
+#include "file_io.h"
+//#include "../../file_io.h"
+//#include "minimig_fdd.h"
 #include <stdint.h>
 #include <vector>
 #include <unordered_map>
@@ -13,10 +14,10 @@ private:
 	signed long m_capsImageIndex;
 	bool m_isOpen;
 
-	uint16_t m_minHead, m_maxHead, m_minCylinder, m_maxCylinder;	
+	uint32_t m_minHead, m_maxHead, m_minCylinder, m_maxCylinder;	
 	std::vector<uint16_t> m_rewindBuffer;	
 	uint16_t m_currentTrack;    	
-	uint32_t m_bufferPos;	
+	uint64_t m_bufferPos;	
 	uint8_t* m_trackBuffer;
 	unsigned long* m_densityBuffer;
 	uint32_t m_trackBufferLength;
@@ -24,8 +25,13 @@ private:
 	uint64_t m_densityCompensation;
 	int32_t m_previousTrack;
 	int64_t m_fluxTime;
+	int32_t m_overlapBit;
 	int64_t m_timeSoFar;
-	bool m_markIndex;
+	//bool m_markIndex;
+	bool m_isFlakey;
+	int m_currentRevolution;
+	int m_nextRevolution;
+	uint32_t m_trackType;
 
 	// Provides a basic decoding. just enough
 	bool decodeTrack(uint32_t track);
@@ -53,6 +59,5 @@ public:
 	virtual uint32_t numHeads() override;
 };
 
-bool caps_init(void);
 
 #endif // __MINIMIG_IPF_H__

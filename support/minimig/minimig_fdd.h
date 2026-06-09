@@ -27,10 +27,18 @@
 #define FLUX_MAX_WAITING ((long long)(254590/ FLUX_CLOCK_SPEED_MHZ))
 
 class FluxFile {
-public:
+private:
+	char tmpFilename[22];
+protected:
 	// Open Flux based file
-	virtual bool openFile(const char* filename) = 0;
-	virtual void closeFile() = 0;
+	virtual bool _openFile(const char* filename) = 0;
+	virtual void _closeFile() = 0;
+public:
+	FluxFile();
+
+	// Open Flux based file
+	virtual bool openFile(const char* filename);
+	virtual void closeFile();
 
 	// Is this available to be read from
 	virtual bool fluxReady() = 0;
@@ -47,7 +55,7 @@ public:
 	virtual uint32_t lastTrack() = 0;
 	virtual uint32_t numHeads() = 0;
 
-	virtual ~FluxFile() {};
+	virtual ~FluxFile() { closeFile(); };
 };
 
 typedef struct

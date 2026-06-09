@@ -24,6 +24,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // 2010-01-09   - support for variable number of tracks
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include "../../hardware.h"
@@ -206,7 +207,7 @@ void ReadTrack(adfTYPE* drive)
 
 	if (drive->track >= drive->tracks)
 	{
-		fdd_debugf("Illegal track read: %d\n", drive->track);
+		fdd_debugf("Illegal track read: %d of %d from %s\n", drive->track, drive->tracks, drive->name);
 		drive->track = drive->tracks - 1;
 	}
 
@@ -689,6 +690,7 @@ void InsertFloppy(adfTYPE* drive, char* path)
 	int writable = FileCanWrite(path);
 
 	char* fext = strrchr(path, '.');
+	printf("File Selected: %s\n", path); fflush(stdout);
 
 	if (fext) {
 		fext++;
@@ -758,4 +760,59 @@ void InsertFloppy(adfTYPE* drive, char* path)
 	menu_debugf("file size: %lu (%lu KB)\n", drive->file.size, drive->file.size >> 10);
 	menu_debugf("drive tracks: %u\n", drive->tracks);
 	menu_debugf("drive status: 0x%02X\n", drive->status);
+}
+
+FluxFile::FluxFile() {
+	tmpFilename[0] = '\0';
+}
+
+// Open Flux based file
+bool FluxFile::openFile(const char* filename) {
+	// SCP accessed via ZIP is too slow, and the IPF library cant parse a ZIP, so if it's a ZIP we need to extract the file from it.
+
+	char* z = strcasestr((char*)filename, ".zip");
+	if (z) {
+		// Extract the file
+		fileTYPE file;
+		if (!FileOpen(&file, filename, 0)) return false;
+		if (!file.zip) {
+			FileClose(&file);
+			return false;
+		}
+		strcpy(tmpFilename, "/tmp/fluxfile-XXXXXX");
+		int fd = mkstemp(tmpFilename);
+		if (fd == -1) {
+			// Failed
+			FileClose(&file);
+			tmpFilename[0] = '\0'; // zero out the filename
+			return false;
+		}
+
+		char buffer[4096];
+		int amount;
+		do {
+			amount = FileReadAdv(&file, buffer, sizeof(buffer), -1);
+			if (amount>0) {
+				if (write(fd, buffer, amount) != amount) {
+					FileClose(&file);
+					close(fd);
+					unlink(tmpFilename);
+					tmpFilename[0] = '\0'; // zero out the filename
+					return false;
+				}
+			}
+		} while (amount > 0);
+		FileClose(&file);
+		close(fd);
+
+		return _openFile(tmpFilename);
+	}
+	else {
+		return _openFile(filename);
+	}
+}
+void FluxFile::closeFile() {
+	_closeFile();
+	if (strlen(tmpFilename)) unlink(tmpFilename);
+	tmpFilename[0] = '\0';
 }

@@ -4,6 +4,7 @@
 #include <utility>
 #include <cstring>
 #include <stdio.h>
+#include "../../debug.h"
 
 #define BITFLAG_INDEX		0
 #define BITFLAG_96TPI		1
@@ -28,6 +29,7 @@ bool SCPFile::readSCPFile() {
 	m_lastTrack = header.endTrack;
 	m_numRevolutions = header.numRevolutions;
 	m_numHeads = header.numHeads;
+	m_currentRevolution = 0;
 	if (m_lastTrack >= 168) return false;
 
 	// only support 16-bit data
@@ -38,7 +40,7 @@ bool SCPFile::readSCPFile() {
 	uint32_t trackOffsets[168];
 
 	if (!FileReadAdv(&m_file, trackOffsets, sizeof(uint32_t) * 168)) return false;	
-	
+
 	// Prepare track areas
 	for (uint32_t trk = m_firstTrack; trk <= m_lastTrack; trk++) {
 		m_tracks.insert(std::make_pair(trk, trackOffsets[trk]));
@@ -52,7 +54,7 @@ bool SCPFile::readSCPFile() {
 bool SCPFile::selectTrack(uint32_t track) {
 	if (!fluxReady()) return false;
 	if (track < m_firstTrack) return false;
-	if (track >= m_lastTrack) return false;
+	if (track > m_lastTrack) return false;
 	if (track == m_currentTrack) return true;
 	m_currentTrack = 0xffff;
 	m_rewindBuffer.clear();
@@ -131,6 +133,10 @@ void SCPFile::unFluxRead(const uint16_t* inputBuffer, uint32_t numWords) {
 	memcpy(m_rewindBuffer.data(), inputBuffer, numWords * sizeof(uint16_t));
 }
 
+inline uint8_t SCPFile::convertTime(int64_t time) {
+	return (uint8_t)std::min(std::max(3LL, ((time + FLUX_HALF_CLOCK_TICK) * FLUX_CLOCK_SPEED_MHZ) / 1000LL), 255LL);
+}
+
 // Read some flux data from the file
 bool SCPFile::fluxRead(uint16_t* outputBuffer, uint32_t numWords) {
 	if (m_currentTrack < m_firstTrack) return false;
@@ -165,22 +171,23 @@ bool SCPFile::fluxRead(uint16_t* outputBuffer, uint32_t numWords) {
 				*bytesOut = 2;   // signal the next byte is a delay only, not transition
 				bytesLeft--; bytesOut++;
 				m_fluxDelayStillWaiting -= FLUX_CLOCK_TICK;    // even this uses one tick
-				uint8_t convertedTime = (uint8_t)std::min(std::max(3LL, ((m_fluxDelayStillWaiting + FLUX_HALF_CLOCK_TICK) * FLUX_CLOCK_SPEED_MHZ) / 1000LL), 255LL);
+				uint8_t convertedTime = convertTime(m_fluxDelayStillWaiting);
 				*bytesOut = convertedTime;
 				bytesOut++; bytesLeft--;
 				m_fluxDelayStillWaiting -= (((int64_t)convertedTime) * 1000LL) / FLUX_CLOCK_SPEED_MHZ;
 				if (m_fluxDelayStillWaiting < 1) m_fluxDelayStillWaiting = 1; 
+				if (bytesLeft < 1) return true;
 			}
 			// Encode flux transition			
 			if (bytesLeft) {
-				uint8_t convertedTime = (uint8_t)std::min(std::max(3LL, ((m_fluxDelayStillWaiting + FLUX_HALF_CLOCK_TICK) * FLUX_CLOCK_SPEED_MHZ) / 1000LL), 255LL);
+				uint8_t convertedTime = convertTime(m_fluxDelayStillWaiting);
 				m_fluxDelayStillWaiting -= (((int64_t)convertedTime) * 1000LL) / FLUX_CLOCK_SPEED_MHZ;
 				*bytesOut = convertedTime;
 				bytesOut++; bytesLeft--;
 				if (m_fluxDelayStillWaiting < 0) m_fluxDelayStillWaiting = 0;
 			}
 			else return true;
-            m_lastTime = m_fluxDelayStillWaiting;
+			m_lastTime = 0;// m_fluxDelayStillWaiting;
             m_fluxDelayStillWaiting = 0;
 		}
 		
@@ -215,7 +222,7 @@ bool SCPFile::fluxRead(uint16_t* outputBuffer, uint32_t numWords) {
 						*bytesOut = 2;   // signal the next byte is a delay only, not transition
 						bytesLeft--; bytesOut++;
 						m_timeRemainingInRevolution -= FLUX_CLOCK_TICK;    // even this uses one tick
-						uint8_t convertedTime = (uint8_t)std::min(std::max(3LL, ((m_timeRemainingInRevolution + FLUX_HALF_CLOCK_TICK) * FLUX_CLOCK_SPEED_MHZ) / 1000LL), 255LL);
+						uint8_t convertedTime = convertTime(m_timeRemainingInRevolution);
 						*bytesOut = convertedTime;
 						bytesOut++; bytesLeft--;
 						m_timeRemainingInRevolution -= (((int64_t)convertedTime) * 1000LL) / FLUX_CLOCK_SPEED_MHZ;
@@ -232,7 +239,11 @@ bool SCPFile::fluxRead(uint16_t* outputBuffer, uint32_t numWords) {
 			if (!fluxReady()) return false;
 			// Skip to next revolution
 			m_currentRevolution = (m_currentRevolution + 1) % m_numRevolutions;
-			if (!FileSeek(&m_file, m_currentTrackOffset + m_revolutions[m_currentRevolution].dataOffset, SEEK_SET)) return false;
+			fdd_debugf("Changing to revolution %i of %i on track %i\n",m_currentRevolution,m_numRevolutions,m_currentTrack); 
+			if (!FileSeek(&m_file, m_currentTrackOffset + m_revolutions[m_currentRevolution].dataOffset, SEEK_SET)) {
+				fdd_debugf("Failed to seek to revolution\n");
+				return false;
+			}
 			m_samplesRemainingInRevolution = m_revolutions[m_currentRevolution].trackLength;
 			m_timeRemainingInRevolution += m_revolutions[m_currentRevolution].indexTime * m_fluxMultiplier;
 			m_bufferRemaining = 0;
@@ -282,7 +293,7 @@ bool SCPFile::fluxRead(uint16_t* outputBuffer, uint32_t numWords) {
 }
 
 // Open SCP file
-bool SCPFile::openFile(const char* filename) {
+bool SCPFile::_openFile(const char* filename) {
 	closeFile();
 	if (!m_buffer) return false;
 
@@ -302,7 +313,7 @@ bool SCPFile::fluxReady() {
 	return m_currentTrack != 0xFFFF;
 }
 
-void SCPFile::closeFile() {
+void SCPFile::_closeFile() {
 	m_currentTrack = 0xFFFF;
 	FileClose(&m_file);
 	memset(&m_file, 0, sizeof(m_file));

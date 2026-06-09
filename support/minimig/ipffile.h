@@ -1,9 +1,12 @@
 #ifndef __MINIMIG_IPF_H__
 #define __MINIMIG_IPF_H__
 
+#ifdef WINDOWS
 #include "file_io.h"
-//#include "../../file_io.h"
-//#include "minimig_fdd.h"
+#else
+#include "../../file_io.h"
+#include "minimig_fdd.h"
+#endif
 #include <stdint.h>
 #include <vector>
 #include <unordered_map>
@@ -27,22 +30,25 @@ private:
 	int64_t m_fluxTime;
 	int32_t m_overlapBit;
 	int64_t m_timeSoFar;
-	//bool m_markIndex;
 	bool m_isFlakey;
+	bool m_revToggle;
 	int m_currentRevolution;
 	int m_nextRevolution;
 	uint32_t m_trackType;
 
 	// Provides a basic decoding. just enough
 	bool decodeTrack(uint32_t track);
+	uint8_t convertTime(int64_t time);
+
+protected:
+	// Open SCP file
+	virtual bool _openFile(const char* filename) override;
+	virtual void _closeFile() override;
 
 public:
 	IPFFile();
     virtual ~IPFFile();
 
-	// Open SCP file
-	virtual bool openFile(const char* filename) override;
-	virtual void closeFile() override;
 
 	virtual bool fluxReady() override;
 		

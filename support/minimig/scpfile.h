@@ -70,13 +70,17 @@ private:
     // Actually read the file
     bool readSCPFile();
 
+	uint8_t convertTime(int64_t time);
+
+protected:
+	// Open SCP file
+	virtual bool _openFile(const char* filename) override;
+	virtual void _closeFile() override;
+
 public:
 	SCPFile();
     virtual ~SCPFile();
 
-	// Open SCP file
-	virtual bool openFile(const char* filename) override;
-	virtual void closeFile() override;
 
 	virtual bool fluxReady() override;
 		

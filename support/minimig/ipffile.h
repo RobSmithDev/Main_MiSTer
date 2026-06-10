@@ -28,17 +28,16 @@ private:
 	uint64_t m_densityCompensation;
 	int32_t m_previousTrack;
 	int64_t m_fluxTime;
-	int32_t m_overlapBit;
-	int64_t m_timeSoFar;
-	bool m_isFlakey;
-	bool m_revToggle;
+	uint32_t m_overlapBit;	
+	bool m_indexSaved = false;
+	bool m_isFlakey;	
 	int m_currentRevolution;
 	int m_nextRevolution;
 	uint32_t m_trackType;
+	uint16_t m_fakeCounter = 0;
 
 	// Provides a basic decoding. just enough
 	bool decodeTrack(uint32_t track);
-	uint8_t convertTime(int64_t time);
 
 protected:
 	// Open SCP file
@@ -51,9 +50,15 @@ public:
 
 
 	virtual bool fluxReady() override;
+
+	// Flux mode used by this file, FLUXMODE_RAWFLUX or FLUXMODE_DENSITY
+	virtual uint8_t fluxMode() { return FLUXMODE_DENSITY; };
 		
 	// Change active track (this includes the head)
 	virtual bool selectTrack(uint32_t track) override;
+
+	// Fills the buffer with noise
+	virtual bool fluxDummyRead(uint16_t* outputBuffer, uint32_t numWords) override;
 
 	virtual bool fluxRead(uint16_t* outputBuffer, uint32_t numWords) override;
 

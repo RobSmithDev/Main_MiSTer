@@ -481,12 +481,13 @@ int minimig_cfg_load(int num)
 				// check file id and version
 				if (strncmp(tmpconf.id, config_id, sizeof(minimig_config.id)) == 0) {
 					if (tmpconf.floppy.drives<4) {
-						memcpy(minimig_config.id, tmpconf.id, 8);
+						memcpy(minimig_config.id, tmpconf.id, sizeof(tmpconf.id));
 						minimig_config.version = tmpconf.version;
 						minimig_config.ext_cfg2 = tmpconf.ext_cfg2;
-						memcpy(minimig_config.kickstart, tmpconf.kickstart, 992);
-						memcpy(minimig_config.label,tmpconf.label,32);
+						memcpy(minimig_config.kickstart, tmpconf.kickstart, sizeof(tmpconf.kickstart));
+						memcpy(minimig_config.label,tmpconf.label,sizeof(tmpconf.label));
 						minimig_config.ext_cfg = tmpconf.ext_cfg;
+						minimig_config.memory = tmpconf.memory;
 						minimig_config.chipset = tmpconf.chipset;
 						minimig_config.floppy.drives = tmpconf.floppy.drives;
 						minimig_config.floppy.speed = tmpconf.floppy.speed;
@@ -508,7 +509,7 @@ int minimig_cfg_load(int num)
 
 						minimig_config.cpu = tmpconf.cpu;
 						minimig_config.autofire = tmpconf.autofire;
-						memcpy(minimig_config.info, tmpconf.info, 64);
+						memcpy(minimig_config.info, tmpconf.info, sizeof(tmpconf.info));
 						result = 1; // We successfully loaded the config.
 					}
 					else BootPrint("Config file sanity check failed!\n");
@@ -575,6 +576,7 @@ int minimig_cfg_load(int num)
 	for (int i = 0; i < 4; i++)
 	{
 		df[i].status = 0;
+		df[i].ex_status = 0;
 		FileClose(&df[i].file);
 		if (df[i].fluxFile) df[i].fluxFile->closeFile();
 	}

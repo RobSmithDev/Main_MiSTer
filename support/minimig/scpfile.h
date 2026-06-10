@@ -66,6 +66,7 @@ private:
 	int64_t m_lastTime;
 	int64_t m_timeRemainingInRevolution;
 	int64_t m_fluxDelayStillWaiting;
+	uint16_t m_fakeCounter = 0;
 
     // Actually read the file
     bool readSCPFile();
@@ -83,9 +84,15 @@ public:
 
 
 	virtual bool fluxReady() override;
+
+	// Flux mode used by this file, FLUXMODE_RAWFLUX or FLUXMODE_DENSITY
+	virtual uint8_t fluxMode() { return FLUXMODE_RAWFLUX; };
 		
 	// Change active track (this includes the head)
 	virtual bool selectTrack(uint32_t track) override;
+
+	// Fills the buffer with noise
+	bool fluxDummyRead(uint16_t* outputBuffer, uint32_t numWords) override;
 
 	// Read some flux data from the file
 	virtual bool fluxRead(uint16_t* outputBuffer, uint32_t numWords) override;

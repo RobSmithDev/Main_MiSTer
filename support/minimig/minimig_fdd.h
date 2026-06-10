@@ -8,13 +8,15 @@
 #define CMD_WRTRK 0x02
 
 // floppy status
-#define DSK_INSERTED 0x001 /*disk is inserted*/
-#define DSK_WRITABLE 0x010 /*disk is writable*/
-#define DSK_FLUXMODE 0x100 /*disk data is in flux mode*/
+#define DSK_INSERTED	0x001   /*disk is inserted*/
+#define DSK_WRITABLE	0x010   /*disk is writable*/
+#define DSK_FLUXMODE	0x100   /*disk data is in flux mode*/
+// ex_status flags
+#define DSKEX_FLUXDENSITY 0x001 /*disk data is flux density mode*/
 
-#define FLUXTYPE_NONE 0x00
-#define FLUXTYPE_IPF  0x01
-#define FLUXTYPE_SCP  0x02
+#define FLUXMODE_NONE      0
+#define FLUXMODE_RAWFLUX   1
+#define FLUXMODE_DENSITY   2
 
 #define MAX_TRACKS (83*2)
 
@@ -28,7 +30,7 @@
 
 class FluxFile {
 private:
-	char tmpFilename[22];
+	char tmpFilename[32];
 protected:
 	// Open Flux based file
 	virtual bool _openFile(const char* filename) = 0;
@@ -43,8 +45,14 @@ public:
 	// Is this available to be read from
 	virtual bool fluxReady() = 0;
 
+	// Flux mode used by this file, FLUXMODE_RAWFLUX or FLUXMODE_DENSITY
+	virtual uint8_t fluxMode() = 0;
+
 	// Change active track (this includes the head)
 	virtual bool selectTrack(uint32_t track) = 0;
+
+	// Fills the buffer with noise
+	virtual bool fluxDummyRead(uint16_t* outputBuffer, uint32_t numWords) = 0;
 
 	// Read some flux data from the file
 	virtual bool fluxRead(uint16_t* outputBuffer, uint32_t numWords) = 0;
@@ -55,13 +63,14 @@ public:
 	virtual uint32_t lastTrack() = 0;
 	virtual uint32_t numHeads() = 0;
 
-	virtual ~FluxFile() { closeFile(); };
+	virtual ~FluxFile() {  };
 };
 
 typedef struct
 {
 	fileTYPE      file;
 	uint16_t      status; /*status of floppy*/
+	uint16_t      ex_status; /*extra status of floppy*/
 	unsigned char tracks; /*number of tracks*/
 	unsigned char sector_offset; /*sector offset to handle tricky loaders*/
 	unsigned char track; /*current track*/

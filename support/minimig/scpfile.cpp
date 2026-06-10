@@ -22,7 +22,7 @@ bool SCPFile::readSCPFile() {
 
 	SCPFileHeader header;
 	if (!FileReadAdv(&m_file, &header, sizeof(header))) return false;
-	if ((header.headerSCP[0] != 'S') || (header.headerSCP[1] != 'C') || (header.headerSCP[2] != 'P')) return false;	
+	if ((header.headerSCP[0] != 'S') || (header.headerSCP[1] != 'C') || (header.headerSCP[2] != 'P')) return false;
 
 	m_fluxMultiplier = (header.timeBase + 1) * 25;
 	m_firstTrack = header.startTrack;
@@ -49,6 +49,21 @@ bool SCPFile::readSCPFile() {
 	m_currentTrack = m_lastTrack + 1;
 	return selectTrack(m_firstTrack);
 } 
+
+// Fills the buffer with noise
+bool SCPFile::fluxDummyRead(uint16_t* outputBuffer, uint32_t numWords) {
+	m_rewindBuffer.clear();
+	static uint8_t x = 1;
+	while (numWords) {
+		x = (x >> 1) ^ (-(x & 1) & 0xB8);
+		*outputBuffer = (m_fakeCounter ? convertTime(2000+((x & 7) * 1000)) : 0) | (convertTime(2000+(((x>>4) & 7) * 1000))<<8);
+		outputBuffer++;
+		numWords--;
+		if (m_fakeCounter++ > 40000) m_fakeCounter = 0;
+	}
+	return true;
+}
+
 
 // Change active track (this includes the head)
 bool SCPFile::selectTrack(uint32_t track) {
@@ -142,6 +157,7 @@ bool SCPFile::fluxRead(uint16_t* outputBuffer, uint32_t numWords) {
 	if (m_currentTrack < m_firstTrack) return false;
 	if (m_currentTrack > m_lastTrack) return false;
 	if (m_numRevolutions < 1) return false;
+	if (!fluxReady()) return false;
 
 	// Rewind!
 	if (m_rewindBuffer.size() == numWords) {
@@ -294,7 +310,6 @@ bool SCPFile::fluxRead(uint16_t* outputBuffer, uint32_t numWords) {
 
 // Open SCP file
 bool SCPFile::_openFile(const char* filename) {
-	closeFile();
 	if (!m_buffer) return false;
 
 	if (!FileOpen(&m_file, filename, 0)) return false;

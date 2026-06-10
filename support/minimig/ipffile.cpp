@@ -120,6 +120,11 @@ uint32_t IPFFile::firstTrack() { return m_minCylinder * numHeads(); }
 uint32_t IPFFile::lastTrack() { return (m_maxCylinder * numHeads()) - 1; }
 uint32_t IPFFile::numHeads() { return (m_maxHead - m_minHead) + 1; };
 
+// Converts the density value into 2us ticks at 28mhz that the amiga core uses
+uint8_t densityToTicks(uint32_t density) {
+	return (uint8_t)std::min(std::max(1, (int)((density * 57375) / 1000000)), 255);
+}
+
 
 // This data just read wasn't used. We dont want to go out of sync.
 void IPFFile::unFluxRead(const uint16_t* inputBuffer, uint32_t numWords) {
@@ -130,19 +135,24 @@ void IPFFile::unFluxRead(const uint16_t* inputBuffer, uint32_t numWords) {
 
 // Open IPF file
 bool IPFFile::_openFile(const char* filename) {
-	closeFile();
-
 	if (!libHandle) return false;
 
 	static char full_path[2100];
+
+	if (filename[0] != '/') {
 #ifdef WINDOWS
-	sprintf(full_path, "%s",  filename);
+		sprintf(full_path, "%s", filename);
 #else
-	sprintf(full_path, "%s/%s", getRootDir(), filename);
+		sprintf(full_path, "%s/%s", getRootDir(), filename);
 #endif
-
-	//fdd_debugf("Opening IPF %s\n", filename);
-
+	}
+	else {
+#ifdef WINDOWS
+		sprintf(full_path, "%s", filename);
+#else
+		sprintf(full_path, "%s", filename);
+#endif
+	}
 	SDWORD result = pCAPSLockImage(m_capsImageIndex, (PCHAR)full_path);
 	if (result != imgeOk) {
 		//fdd_debugf("Unable to open %s (error %li)", filename, result);
@@ -160,28 +170,19 @@ bool IPFFile::_openFile(const char* filename) {
 	m_minHead = info.minhead;
 	m_maxHead = info.maxhead;
 	m_minCylinder = info.mincylinder;
-	m_maxCylinder = info.maxcylinder;
-	//fdd_debugf("IPF Min Head: %i, Max Head: %i\n", m_minHead, m_maxHead);
-	//fdd_debugf("IPF Min Cyl: %i, Max Cyl: %i\n", m_minCylinder, m_maxCylinder);
-
+	m_maxCylinder = info.maxcylinder;	
 
 	if (pCAPSLoadImage(m_capsImageIndex, LOCK_FLAGS) != imgeOk) {
 		closeFile();
 		return false;
 	}
 
-	//fdd_debugf("Load first track\n");
 	bool ret = selectTrack(firstTrack());
-	//fdd_debugf(ret?"First track loaded\n":"First track failed to load\n");
 	if (!ret) {
 		closeFile();
 		return false;
 	}
 	return true;
-}
-
-inline uint8_t IPFFile::convertTime(int64_t time) {
-	return (uint8_t)std::min(std::max(3LL, ((time + FLUX_HALF_CLOCK_TICK) * FLUX_CLOCK_SPEED_MHZ) / 1000LL), 255LL);
 }
 
 // Change active track (this includes the head)
@@ -192,8 +193,6 @@ bool IPFFile::selectTrack(uint32_t track) {
 	m_currentTrack = 0xffff;
 	m_rewindBuffer.clear();
 	m_fluxTime = 0;
-	m_revToggle = !m_revToggle;
-	m_timeSoFar = 0;
 	uint32_t lastBufferPos = m_bufferPos;
 	uint32_t lastBufferLength = m_trackBufferLength;
 
@@ -202,18 +201,13 @@ bool IPFFile::selectTrack(uint32_t track) {
 	m_nextRevolution = 0;
 	m_isFlakey = false;
 
-	//fdd_debugf("Begin decoding track %i\n", track);
 	if (decodeTrack(track)) {
-		//fdd_debugf("Track %i decoded, contains %i flux transitions\n", track, m_trackBufferLength);
 		// Skip to a position within the data to simulate the fact that the disk is still spinning		
-		uint64_t newSamplePos = lastBufferLength ? (lastBufferPos * m_trackBufferLength) / lastBufferLength : 0;
-		if (newSamplePos >= m_trackBufferLength - 1) newSamplePos = 0;
+		uint64_t newSamplePos = lastBufferLength ? (lastBufferPos * (m_trackBufferLength/8)) / (lastBufferLength/8) : 0;
+		if (newSamplePos >= (m_trackBufferLength/8) - 1) newSamplePos = 0;
 		m_bufferPos = newSamplePos;
 		m_currentTrack = track;
 		return true;
-	}
-	else {
-		//fdd_debugf("Failed to decode track %i\n", track);
 	}
 	return false;
 }
@@ -225,6 +219,7 @@ bool IPFFile::decodeTrack(uint32_t track) {
 	trackInfo.type = 2;
 	trackInfo.wseed = (UDWORD)rand();  // seed weak bits so they vary between reads
 	m_bufferPos = 0;
+	m_indexSaved = false;
 
 	// Unlock previous track first, before any other library calls
 	if (m_previousTrack >= 0) pCAPSUnlockTrack(m_capsImageIndex, m_previousTrack / numHeads(), m_minHead + (m_previousTrack % numHeads()));
@@ -242,7 +237,7 @@ bool IPFFile::decodeTrack(uint32_t track) {
 	m_trackBufferLength = trackInfo.tracklen;
 	m_densityBufferLength = trackInfo.timelen;
 	m_trackType = trackInfo.type;
-	m_overlapBit = (trackInfo.overlap >= 0) ? trackInfo.overlap : 0;
+	m_overlapBit = (trackInfo.overlap >= 0) ? (uint32_t)trackInfo.overlap : 0;
 
 	// Check for flakey/weak-bit tracks (intentional revolution-to-revolution variation)
 	m_isFlakey = (trackInfo.type & CTIT_FLAG_FLAKEY) != 0;
@@ -279,7 +274,7 @@ bool IPFFile::decodeTrack(uint32_t track) {
 	}
 	else m_densityCompensation = 1000UL;
 
-	return (m_trackBufferLength > 0) && (m_trackBuffer);
+	return ((m_trackBufferLength > 0) && (m_trackBuffer)) || (m_trackType == ctitNoise);
 }
 
 void IPFFile::_closeFile() {
@@ -290,17 +285,16 @@ void IPFFile::_closeFile() {
 	m_densityBuffer = NULL;
 	m_trackBufferLength = 0;
 	m_densityBufferLength = 0;
-	m_timeSoFar = 0;
 	m_trackType = 0;
 	m_isFlakey = false;
 	m_currentRevolution = 0;
 	m_nextRevolution = 0;
-
 	if (m_isOpen) {
 		pCAPSUnlockAllTracks(m_capsImageIndex);
 		pCAPSUnlockImage(m_capsImageIndex);
 		m_isOpen = false;
 	}
+
 	m_currentTrack = 0xffff;
 	m_rewindBuffer.clear();
 	m_minHead = 0;
@@ -310,11 +304,35 @@ void IPFFile::_closeFile() {
 }
 
 bool IPFFile::fluxReady() {
-	return (m_currentTrack != 0xFFFF) && (m_trackBufferLength > 0) && (m_trackBuffer);
+	return (m_currentTrack != 0xFFFF) && (((m_trackBufferLength > 0) && (m_trackBuffer)) || (m_trackType == ctitNoise));
 }
+
+// Fills the buffer with noise
+bool IPFFile::fluxDummyRead(uint16_t* outputBuffer, uint32_t numWords) {
+	m_rewindBuffer.clear();
+	uint16_t d = densityToTicks(1000);
+
+	static uint8_t x = 1;
+	while (numWords) {
+		x = (x >> 1) ^ (-(x & 1) & 0xB8);
+		if (m_fakeCounter) *outputBuffer = d | ((x << 8) & 0xAA); else *outputBuffer = 0;
+		outputBuffer++;
+		numWords--;
+		if (m_fakeCounter++ > 12500) m_fakeCounter = 0;
+	}
+	return true;
+}
+
 
 // Read some flux data from the file
 bool IPFFile::fluxRead(uint16_t* outputBuffer, uint32_t numWords) {
+	if (m_currentTrack == 0xFFFF) return false;
+	if ((m_trackType == ctitNoise) || (!m_trackBuffer) || (m_trackBufferLength < 1)) {
+		m_rewindBuffer.clear();
+		return fluxDummyRead(outputBuffer, numWords);
+	}
+	if (!fluxReady()) return false;
+
 	if (m_currentTrack < firstTrack()) return false;
 	if (m_currentTrack >= lastTrack()) return false;
 
@@ -324,129 +342,30 @@ bool IPFFile::fluxRead(uint16_t* outputBuffer, uint32_t numWords) {
 		m_rewindBuffer.clear();
 		return true;
 	}
-
-	uint8_t* bytesOut = (uint8_t*)outputBuffer;
-	uint32_t bytesLeft = numWords * 2UL;
 	
-	while (bytesLeft) {
-
-		// Encode flux transition information
-		if (m_fluxTime) {
-			while (m_fluxTime > FLUX_MAX_WAITING) {  // approx 255				
-				if (!fluxReady()) return false;
-				// 1 byte left, encode a single tick delay
-				if (bytesLeft == 1) {
-					*bytesOut = 1; bytesLeft--; bytesOut++;
-					m_fluxTime -= FLUX_CLOCK_TICK;
-					if (m_fluxTime < 1) m_fluxTime = 1;
-					return true;
-				}
-				// 2 bytes left
-				*bytesOut = 2;   // signal the next byte is a delay only, not transition
-				bytesLeft--; bytesOut++;
-				m_fluxTime -= FLUX_CLOCK_TICK;    // even this uses one tick
-				uint8_t convertedTime = convertTime(m_fluxTime);
-				*bytesOut = convertedTime;
-				bytesOut++; bytesLeft--;
-				m_fluxTime -= (((int64_t)convertedTime) * 1000LL) / FLUX_CLOCK_SPEED_MHZ;
-				if (m_fluxTime < 1) m_fluxTime = 1;
-				if (bytesLeft < 1) return true;
-			}
-			// Encode flux transition			
-			if (bytesLeft) {
-				uint8_t convertedTime = convertTime(m_fluxTime);
-				m_fluxTime -= (((int64_t)convertedTime) * 1000LL) / FLUX_CLOCK_SPEED_MHZ;
-				*bytesOut = convertedTime;
-				bytesOut++; bytesLeft--;
-			}
-			else return true;			
-			if (m_trackType != ctitVar) m_timeSoFar += m_fluxTime;
-			m_fluxTime = 0;
+	while (numWords) {
+		// index
+		if ((m_bufferPos == m_overlapBit) && (!m_indexSaved)) {
+			*outputBuffer = 0;
+			outputBuffer++;
+			numWords--;
+			m_indexSaved = true;
 		}
 
-		// Need more data? Re-decode for next revolution.
-		if (m_bufferPos >= m_trackBufferLength) {
-			// Advance revolution for flakey tracks before re-decoding
+		if (numWords < 1) return true;
+
+		UDWORD density = ((m_densityBuffer) && (m_densityBufferLength) && (m_bufferPos < m_densityBufferLength)) ? m_densityBuffer[m_bufferPos] : 1000ULL;
+		
+		*outputBuffer = densityToTicks(density)  | (m_trackBuffer[m_bufferPos] << 8);
+		outputBuffer++;
+		m_bufferPos++;
+		if (m_bufferPos >= m_trackBufferLength  / 8) {
 			if (m_isFlakey)
 				m_currentRevolution = m_nextRevolution;
-			m_revToggle = !m_revToggle;
 			if (!decodeTrack(m_previousTrack >= 0 ? m_previousTrack : m_currentTrack)) return false;
+			m_bufferPos = 0;
 		}
-
-		// INDEX
-		if (m_bufferPos == m_overlapBit) {
-			// We need to send INDEX, but theres a residual from the previous loop. Needs encoding so INDEX appears at the right position
-			if (m_timeSoFar) {
-				while (m_timeSoFar > FLUX_CLOCK_TICK) {
-					if (!fluxReady()) return false;
-					// 1 byte left, encode a single tick delay
-					if (bytesLeft == 1) {
-						*bytesOut = 1; bytesLeft--; bytesOut++;
-						m_timeSoFar -= FLUX_CLOCK_TICK;
-						return true;
-					}
-					// More than 1 byte remaining!
-					// Less than 2 ticks (1.5) worth of time remaining?
-					if (m_timeSoFar < FLUX_CLOCK_TICK_1_5) {
-						*bytesOut = 1;   // Single delay
-						bytesLeft--; bytesOut++;
-						m_timeSoFar = 0;
-					}
-					else {
-						// Less than 3 ticks (2.5 worth)
-						if (m_timeSoFar < FLUX_CLOCK_TICK_2_5) {
-							*bytesOut = 1;    bytesOut++;
-							*bytesOut = 1;    bytesOut++;
-							bytesLeft -= 2;
-							m_timeSoFar = 0;
-						}
-						else {
-							// 3 or more ticks
-							*bytesOut = 2;   // signal the next byte is a delay only, not transition
-							bytesLeft--; bytesOut++;
-							m_timeSoFar -= FLUX_CLOCK_TICK;    // even this uses one tick
-							uint8_t convertedTime = convertTime(m_timeSoFar);
-							*bytesOut = convertedTime;
-							bytesOut++; bytesLeft--;
-							m_timeSoFar -= (((int64_t)convertedTime) * 1000LL) / FLUX_CLOCK_SPEED_MHZ;
-							if (convertedTime <= 3) 
-								m_timeSoFar = 0; // just incase
-						}
-					}
-
-					// Stop if out of data space
-					if (bytesLeft < 1) return true;
-				}
-			}
-			*bytesOut = 0; // INDEX
-			bytesOut++; bytesLeft--;
-			m_timeSoFar = -FLUX_CLOCK_TICK;  // account for time consumed by the index byte itself
-			if (bytesLeft < 1) return true;
-		}
-
-		// Bit-level
-		const uint32_t bytePos = m_bufferPos / 8;
-		UDWORD density = ((m_densityBuffer) && (m_densityBufferLength) && (bytePos < m_densityBufferLength)) ? m_densityBuffer[bytePos] : 1000ULL;		
-		m_timeSoFar += DensityToNS(density * m_densityCompensation / 1000ULL);
-		
-
-		// Bit detected
-		if (m_trackBuffer[bytePos] & (1 << (7 - (m_bufferPos & 7)))) {			
-
-			// Fixes a rounding error - this is a hack. 
-			// With it, CopyLock works on some tiles, Without it, Copylock works on others.
-			// This is a rounding error caused by the flux transitions being quantized to FLUX_CLOCK_SPEED_MHZ
-			// And its *way* more complex to fix that in the core.
-			if (m_revToggle && (density > 1040)) {
-				if ((m_timeSoFar > 4000) && (m_timeSoFar < 5000)) {
-					m_timeSoFar *= 1.05;
-				}
-			}
-			m_fluxTime = std::max(1LL, m_timeSoFar);
-			m_timeSoFar = 0LL;
-		}
-
-		m_bufferPos++;
+		numWords--;
 	}
 
 	return true;

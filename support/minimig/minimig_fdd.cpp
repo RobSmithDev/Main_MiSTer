@@ -215,8 +215,8 @@ void ReadTrack(adfTYPE* drive)
 
 	const bool fluxMode = drive->fluxFile && drive->fluxFile->fluxReady();
 
-	if (fluxMode) {
-		if (!drive->fluxFile->selectTrack(drive->track)) return;
+	if (fluxMode) {		
+		drive->fluxFile->selectTrack(drive->track);
 		sector = 0;
 	}
 	else {
@@ -247,10 +247,15 @@ void ReadTrack(adfTYPE* drive)
 
 	if (track >= drive->tracks) track = drive->tracks - 1;	
 	
-	while (1)
+	// Its possible for flux to be needed at such a high rate that the menu freezes. This allows a small amount of breathing
+	int fluxModeCounter = 0;
+	while (fluxModeCounter < 32)
 	{
 		if (fluxMode) {
-			if (!drive->fluxFile->fluxRead((uint16_t*)&mfm_data, sizeof(mfm_data) / sizeof(uint16_t))) break;
+			if (!drive->fluxFile->fluxRead((uint16_t*)&mfm_data, sizeof(mfm_data) / sizeof(uint16_t))) {
+				drive->fluxFile->fluxDummyRead((uint16_t*)&mfm_data, sizeof(mfm_data) / sizeof(uint16_t)); // make ups some data
+			}
+			fluxModeCounter++;
 		} else {
 			FileReadSec(&drive->file, mfm_data.sector_buffer);
 		}
@@ -660,6 +665,9 @@ void UpdateDriveStatus(void)
 	EnableFpga();
 	spi_w(0x1000 | df[0].status | (df[1].status << 1) | (df[2].status << 2) | (df[3].status << 3));
 	DisableFpga();
+	EnableFpga();
+	spi_w(0x2000 | df[0].ex_status | (df[1].ex_status << 1) | (df[2].ex_status << 2) | (df[3].ex_status << 3));
+	DisableFpga();
 }
 
 void HandleFDD(unsigned char c1, unsigned char c2)
@@ -684,13 +692,13 @@ void HandleFDD(unsigned char c1, unsigned char c2)
 // insert floppy image pointed to to by global <file> into <drive>
 void InsertFloppy(adfTYPE* drive, char* path)
 {
-	if (drive->fluxFile) delete drive->fluxFile;
+	FluxFile* tmpFlux = drive->fluxFile;
 	drive->fluxFile = NULL;
+	if (tmpFlux) delete tmpFlux;
+	tmpFlux = NULL;
 
 	int writable = FileCanWrite(path);
-
 	char* fext = strrchr(path, '.');
-	printf("File Selected: %s\n", path); fflush(stdout);
 
 	if (fext) {
 		fext++;
@@ -699,30 +707,37 @@ void InsertFloppy(adfTYPE* drive, char* path)
 			if (fext[i]) tmp[i] = tolower(fext[i]); else break;
 
 		if (strcmp(tmp, "scp") == 0) {
-			drive->fluxFile = new SCPFile();
+			tmpFlux = new SCPFile();
 			menu_debugf("SCP file: \"%s\"\n", path);
 		}
 		else
 		if (strcmp(tmp, "ipf") == 0) {
-			drive->fluxFile = new IPFFile();
+			tmpFlux = new IPFFile();
 			menu_debugf("IPF file: \"%s\"\n", path);
 		}
 	}
-
-	if (drive->fluxFile) {
-		if (!drive->fluxFile->openFile(path)) return;
-		drive->tracks = drive->fluxFile->lastTrack() - drive->fluxFile->firstTrack();
-		drive->status = DSK_INSERTED | DSK_FLUXMODE;
-		drive->sector_offset = 0;
-		drive->lastBit = 0xAAAA;
-		drive->track = 0;
-		drive->track_prev = -1;
-		strcpy(drive->name, path);
+	
+	if (tmpFlux) {
+		drive->status = 0;
+		if (!tmpFlux->openFile(path)) {
+			delete tmpFlux;
+			return;
+		}		
 		menu_debugf("Inserting floppy: \"%s\"\n", path);
 		menu_debugf("file writable: %d\n", 0);
 		menu_debugf("file size: %lu (%lu KB)\n", drive->file.size, drive->file.size >> 10);
 		menu_debugf("drive tracks: %u\n", drive->tracks);
 		menu_debugf("drive status: 0x%02X\n", drive->status);
+
+		drive->tracks = tmpFlux->lastTrack() - tmpFlux->firstTrack();		
+		drive->sector_offset = 0;
+		drive->lastBit = 0xAAAA;
+		drive->track = 0;
+		drive->track_prev = -1;
+		strcpy(drive->name, path);
+		drive->fluxFile = tmpFlux;
+		drive->ex_status = (tmpFlux->fluxMode() == FLUXMODE_DENSITY) ? DSKEX_FLUXDENSITY : 0;
+		drive->status = DSK_INSERTED | DSK_FLUXMODE;
 		return;
 	}
 
@@ -746,6 +761,7 @@ void InsertFloppy(adfTYPE* drive, char* path)
 	strcpy(drive->name, path);
 
 	// initialize the rest of drive struct
+	drive->ex_status = 0;
 	drive->status = DSK_INSERTED;
 	if (writable) // read-only attribute
 		drive->status |= DSK_WRITABLE;
@@ -768,6 +784,7 @@ FluxFile::FluxFile() {
 
 // Open Flux based file
 bool FluxFile::openFile(const char* filename) {
+	closeFile();
 	// SCP accessed via ZIP is too slow, and the IPF library cant parse a ZIP, so if it's a ZIP we need to extract the file from it.
 
 	char* z = strcasestr((char*)filename, ".zip");

@@ -265,9 +265,6 @@
     <ClCompile Include="support\minimig\scpfile.cpp">
       <Filter>Source Files\support</Filter>
     </ClCompile>
-    <ClCompile Include="hdmi_cec.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="battery.h">

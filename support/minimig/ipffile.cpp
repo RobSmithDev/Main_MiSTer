@@ -123,6 +123,7 @@ uint32_t IPFFile::numHeads() { return (m_maxHead - m_minHead) + 1; };
 // Converts the density value into 2us ticks at 28mhz that the amiga core uses
 uint8_t densityToTicks(uint32_t density) {
 	return (uint8_t)std::min(std::max(1, (int)((density * 57375) / 1000000)), 255);
+	return (uint8_t)std::min(std::max(1, (int)((density * 2 * FLUX_CLOCK_SPEED_HZ) / 1000000000LL)), 255);
 }
 
 

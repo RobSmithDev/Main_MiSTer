@@ -122,7 +122,6 @@ uint32_t IPFFile::numHeads() { return (m_maxHead - m_minHead) + 1; };
 
 // Converts the density value into 2us ticks at 28mhz that the amiga core uses
 uint8_t densityToTicks(uint32_t density) {
-	return (uint8_t)std::min(std::max(1, (int)((density * 57375) / 1000000)), 255);
 	return (uint8_t)std::min(std::max(1, (int)((density * 2 * FLUX_CLOCK_SPEED_HZ) / 1000000000LL)), 255);
 }
 
@@ -255,7 +254,7 @@ bool IPFFile::decodeTrack(uint32_t track) {
 	}
 
 	if (trackInfo.trackbuf) {
-		if (m_trackType == ctitVar) {
+		if ((m_trackType & CTIT_MASK_TYPE) == ctitVar) {
 			// Variable density track - density buffer contains absolute cell sizes,
 			// not relative weights. Use raw values with no compensation.
 			// This is critical for copy protection tracks (e.g. Rob Northen Copylock)
@@ -275,7 +274,7 @@ bool IPFFile::decodeTrack(uint32_t track) {
 	}
 	else m_densityCompensation = 1000UL;
 
-	return ((m_trackBufferLength > 0) && (m_trackBuffer)) || (m_trackType == ctitNoise);
+	return ((m_trackBufferLength > 0) && (m_trackBuffer)) || ((m_trackType & CTIT_MASK_TYPE) == ctitNoise);
 }
 
 void IPFFile::_closeFile() {
@@ -305,7 +304,7 @@ void IPFFile::_closeFile() {
 }
 
 bool IPFFile::fluxReady() {
-	return (m_currentTrack != 0xFFFF) && (((m_trackBufferLength > 0) && (m_trackBuffer)) || (m_trackType == ctitNoise));
+	return (m_currentTrack != 0xFFFF) && (((m_trackBufferLength > 0) && (m_trackBuffer)) || ((m_trackType & CTIT_MASK_TYPE) == ctitNoise));
 }
 
 // Fills the buffer with noise
@@ -328,7 +327,7 @@ bool IPFFile::fluxDummyRead(uint16_t* outputBuffer, uint32_t numWords) {
 // Read some flux data from the file
 bool IPFFile::fluxRead(uint16_t* outputBuffer, uint32_t numWords) {
 	if (m_currentTrack == 0xFFFF) return false;
-	if ((m_trackType == ctitNoise) || (!m_trackBuffer) || (m_trackBufferLength < 1)) {
+	if (((m_trackType & CTIT_MASK_TYPE) == ctitNoise) || (!m_trackBuffer) || (m_trackBufferLength < 1)) {
 		m_rewindBuffer.clear();
 		return fluxDummyRead(outputBuffer, numWords);
 	}

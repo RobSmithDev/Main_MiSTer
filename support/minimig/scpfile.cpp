@@ -149,7 +149,7 @@ void SCPFile::unFluxRead(const uint16_t* inputBuffer, uint32_t numWords) {
 }
 
 inline uint8_t SCPFile::convertTime(int64_t time) {
-	return (uint8_t)std::min(std::max(3LL, ((time + FLUX_HALF_CLOCK_TICK) * FLUX_CLOCK_SPEED_MHZ) / 1000LL), 255LL);
+	return (uint8_t)std::min(std::max(3LL, ((time + FLUX_HALF_CLOCK_TICK) * FLUX_CLOCK_SPEED_HZ) / 1000000000LL), 255LL);
 }
 
 // Read some flux data from the file
@@ -190,14 +190,14 @@ bool SCPFile::fluxRead(uint16_t* outputBuffer, uint32_t numWords) {
 				uint8_t convertedTime = convertTime(m_fluxDelayStillWaiting);
 				*bytesOut = convertedTime;
 				bytesOut++; bytesLeft--;
-				m_fluxDelayStillWaiting -= (((int64_t)convertedTime) * 1000LL) / FLUX_CLOCK_SPEED_MHZ;
+				m_fluxDelayStillWaiting -= ((int64_t)convertedTime) * FLUX_CLOCK_TICK;
 				if (m_fluxDelayStillWaiting < 1) m_fluxDelayStillWaiting = 1; 
 				if (bytesLeft < 1) return true;
 			}
 			// Encode flux transition			
 			if (bytesLeft) {
 				uint8_t convertedTime = convertTime(m_fluxDelayStillWaiting);
-				m_fluxDelayStillWaiting -= (((int64_t)convertedTime) * 1000LL) / FLUX_CLOCK_SPEED_MHZ;
+				m_fluxDelayStillWaiting -= ((int64_t)convertedTime) * FLUX_CLOCK_TICK;
 				*bytesOut = convertedTime;
 				bytesOut++; bytesLeft--;
 				if (m_fluxDelayStillWaiting < 0) m_fluxDelayStillWaiting = 0;
@@ -241,7 +241,7 @@ bool SCPFile::fluxRead(uint16_t* outputBuffer, uint32_t numWords) {
 						uint8_t convertedTime = convertTime(m_timeRemainingInRevolution);
 						*bytesOut = convertedTime;
 						bytesOut++; bytesLeft--;
-						m_timeRemainingInRevolution -= (((int64_t)convertedTime) * 1000LL) / FLUX_CLOCK_SPEED_MHZ;
+						m_timeRemainingInRevolution -= ((int64_t)convertedTime) * FLUX_CLOCK_TICK;
 						if (convertedTime <=4) m_timeRemainingInRevolution = 0; // just incase
 					}
 				}
